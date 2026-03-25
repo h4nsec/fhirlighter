@@ -1,52 +1,132 @@
-# init-ig.ps1 — Scaffold a new FHIR Implementation Guide
-# Run this script once inside a new empty directory.
-# It will set up the full project structure and install all tooling.
-param(
-    [switch]$Force  # Overwrite existing files without prompting
-)
-$ErrorActionPreference = "Stop"
+# init-ig.ps1 - Scaffold a new FHIR Implementation Guide
+param([switch]$Force)
+$ErrorActionPreference = "Continue"
 $scriptDir = $PSScriptRoot
 
-# ─────────────────────────────────────────────────────────────
-# SHARED TOOL DISCOVERY
-# ─────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------
+# UNICODE CHARS - assigned via char codes so the parser never sees
+# raw multi-byte literals, which can confuse older PS versions
+# ------------------------------------------------------------------
+$C_CHECK  = [char]0x2713  # checkmark
+$C_CROSS  = [char]0x2717  # cross
+$C_WARN   = [char]0x25B6  # triangle (warning)
+$C_DOT    = [char]0x25CF  # filled circle
+$C_SPIN   = @(
+    [char]0x280B, [char]0x2819, [char]0x2839, [char]0x2838,
+    [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827,
+    [char]0x2807, [char]0x280F
+)  # braille spinner frames
+
+# ------------------------------------------------------------------
+# SPINNER  (runs in a background runspace)
+# ------------------------------------------------------------------
+$script:SpinPS = $null
+$script:SpinRS = $null
+
+function Start-Spinner {
+    param([string]$Message)
+    $script:SpinRS = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $script:SpinRS.Open()
+    $script:SpinPS = [System.Management.Automation.PowerShell]::Create()
+    $script:SpinPS.Runspace = $script:SpinRS
+    [void]$script:SpinPS.AddScript({
+        param($msg, $frames)
+        $i = 0
+        while ($true) {
+            [Console]::Write("`r  $($frames[$i % $frames.Length])  $msg   ")
+            [System.Threading.Thread]::Sleep(80)
+            $i++
+        }
+    }).AddArgument($Message).AddArgument($C_SPIN)
+    $script:SpinHandle = $script:SpinPS.BeginInvoke()
+}
+
+function Stop-Spinner {
+    param([string]$Message, [bool]$OK = $true)
+    try { $script:SpinPS.Stop()    } catch {}
+    try { $script:SpinPS.Dispose() } catch {}
+    try { $script:SpinRS.Close()   } catch {}
+    try { $script:SpinRS.Dispose() } catch {}
+    $pad = " " * 50
+    if ($OK) {
+        Write-Host "`r  $C_CHECK  $Message$pad" -ForegroundColor Green
+    } else {
+        Write-Host "`r  $C_CROSS  $Message$pad" -ForegroundColor Red
+    }
+}
+
+# ------------------------------------------------------------------
+# OUTPUT HELPERS
+# ------------------------------------------------------------------
+function Write-Banner {
+    $w = 56
+    $line = "-" * $w
+    Write-Host ""
+    Write-Host "  $line" -ForegroundColor DarkCyan
+    Write-Host ""
+    Write-Host "    ______  __  __  ___  ____  " -ForegroundColor Cyan
+    Write-Host "   / ____/ / / / / /  / / __ \ " -ForegroundColor Cyan
+    Write-Host "  / ___/  / /_/ / /  / / /_/ / " -ForegroundColor Cyan
+    Write-Host " / /     / __  / /  / / _, _/  " -ForegroundColor Cyan
+    Write-Host "/_/  lighter /_/ /_/ /_/ |_|   " -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "    FHIR Implementation Guide Tooling" -ForegroundColor DarkCyan
+    Write-Host ""
+    Write-Host "  $line" -ForegroundColor DarkCyan
+    Write-Host ""
+}
+
+function Write-Section {
+    param([string]$Title)
+    Write-Host ""
+    Write-Host "  $Title" -ForegroundColor White
+    Write-Host "  $("-" * 44)" -ForegroundColor DarkGray
+}
+
+function Write-OK   { param([string]$Msg) Write-Host "  $C_CHECK  $Msg" -ForegroundColor Green   }
+function Write-Fail { param([string]$Msg) Write-Host "  $C_CROSS  $Msg" -ForegroundColor Red     }
+function Write-Warn { param([string]$Msg) Write-Host "  $C_WARN   $Msg" -ForegroundColor Yellow  }
+function Write-Info { param([string]$Msg) Write-Host "  $C_DOT    $Msg" -ForegroundColor DarkGray }
+
+# ------------------------------------------------------------------
+# TOOL DISCOVERY
+# ------------------------------------------------------------------
 function Find-Java {
-    $java = Get-Command java -ErrorAction SilentlyContinue
-    if ($java) { return $java.Source }
-    $candidates = @(
+    $j = Get-Command java -ErrorAction SilentlyContinue
+    if ($j) { return $j.Source }
+    foreach ($base in @(
         "$env:ProgramFiles\Java",
         "$env:ProgramFiles\Eclipse Adoptium",
         "$env:ProgramFiles\Microsoft",
         "$env:ProgramFiles\OpenJDK",
         "$env:LOCALAPPDATA\Programs\Eclipse Adoptium",
         "$env:LOCALAPPDATA\Programs\OpenJDK"
-    )
-    foreach ($base in $candidates) {
+    )) {
         if (Test-Path $base) {
-            $found = Get-ChildItem $base -Recurse -Filter "java.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($found) { return $found.FullName }
+            $f = Get-ChildItem $base -Recurse -Filter "java.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($f) { return $f.FullName }
         }
     }
     return $null
 }
 
 function Find-RubyBin {
-    $ruby = Get-Command ruby -ErrorAction SilentlyContinue
-    if ($ruby) { return Split-Path $ruby.Source }
-    $found = Get-ChildItem "C:\Ruby*\bin\ruby.exe" -ErrorAction SilentlyContinue |
-             Sort-Object FullName -Descending | Select-Object -First 1
-    if ($found) { return Split-Path $found.FullName }
-    $found = Get-ChildItem "$env:LOCALAPPDATA\Programs\Ruby*\bin\ruby.exe" -ErrorAction SilentlyContinue |
-             Sort-Object FullName -Descending | Select-Object -First 1
-    if ($found) { return Split-Path $found.FullName }
+    $r = Get-Command ruby -ErrorAction SilentlyContinue
+    if ($r) { return Split-Path $r.Source }
+    $f = Get-ChildItem "C:\Ruby*\bin\ruby.exe" -ErrorAction SilentlyContinue |
+         Sort-Object FullName -Descending | Select-Object -First 1
+    if ($f) { return Split-Path $f.FullName }
+    $f = Get-ChildItem "$env:LOCALAPPDATA\Programs\Ruby*\bin\ruby.exe" -ErrorAction SilentlyContinue |
+         Sort-Object FullName -Descending | Select-Object -First 1
+    if ($f) { return Split-Path $f.FullName }
     return $null
 }
 
 function Find-GemBin {
-    $ruby = Get-Command ruby -ErrorAction SilentlyContinue
-    if ($ruby) {
-        $gemBin = & ruby -e "puts Gem.bindir" 2>$null
-        if ($gemBin -and (Test-Path $gemBin.Trim())) { return $gemBin.Trim() }
+    $r = Get-Command ruby -ErrorAction SilentlyContinue
+    if ($r) {
+        $g = & ruby -e "puts Gem.bindir" 2>$null
+        if ($g -and (Test-Path $g.Trim())) { return $g.Trim() }
     }
     return $null
 }
@@ -54,343 +134,243 @@ function Find-GemBin {
 function Patch-SessionPath {
     param([string]$javaExe, [string]$rubyBin, [string]$gemBin, [string]$projectRoot)
     $env:JAVA_HOME = Split-Path (Split-Path $javaExe)
-    $additions = @( (Split-Path $javaExe), $rubyBin, $gemBin, "$projectRoot\node_modules\.bin" )
-    foreach ($p in $additions) {
-        if ($p -and $env:PATH -notlike "*$p*") { $env:PATH = "$p;$env:PATH" }
+    foreach ($p in @((Split-Path $javaExe), $rubyBin, $gemBin, "$projectRoot\node_modules\.bin")) {
+        if ($p -and ($env:PATH -notlike "*$p*")) { $env:PATH = "$p;$env:PATH" }
     }
 }
 
-# ─────────────────────────────────────────────────────────────
-# HEADER
-# ─────────────────────────────────────────────────────────────
-Write-Host ""
-Write-Host "  FHIR IG Initialiser" -ForegroundColor Cyan
-Write-Host "  ────────────────────────────────────────" -ForegroundColor DarkGray
-Write-Host ""
+# ------------------------------------------------------------------
+# PROMPT HELPER
+# ------------------------------------------------------------------
+function Prompt-Value {
+    param([string]$Label, [string]$Default, [string]$Hint = "")
+    if ($Hint) { Write-Host "    $Hint" -ForegroundColor DarkGray }
+    $display = if ($Default) { " [$Default]" } else { "" }
+    $val = Read-Host "    $Label$display"
+    if ([string]::IsNullOrWhiteSpace($val)) { return $Default }
+    return $val.Trim()
+}
 
-# ─────────────────────────────────────────────────────────────
-# GUARD — don't clobber an existing project
-# ─────────────────────────────────────────────────────────────
-$targetDir = Get-Location
-if ((Test-Path "$targetDir\sushi-config.yaml") -and -not $Force) {
-    Write-Host "  sushi-config.yaml already exists in this directory." -ForegroundColor Yellow
-    Write-Host "  This looks like an existing IG project. Use dev.ps1 instead." -ForegroundColor Yellow
-    Write-Host "  Run with -Force to overwrite." -ForegroundColor DarkGray
+# ==================================================================
+# MAIN
+# ==================================================================
+Write-Banner
+
+# ------------------------------------------------------------------
+# GUARD
+# ------------------------------------------------------------------
+$targetDir = (Get-Location).Path
+if ((Test-Path "$targetDir\sushi-config.yaml") -and (-not $Force)) {
+    Write-Warn "sushi-config.yaml already exists here."
+    Write-Info "Use dev.ps1 for an existing project, or run with -Force to overwrite."
+    Write-Host ""
     exit 1
 }
 
-# ─────────────────────────────────────────────────────────────
-# PREREQUISITE CHECKS
-# ─────────────────────────────────────────────────────────────
-Write-Host "  Checking prerequisites..." -ForegroundColor Cyan
+# ------------------------------------------------------------------
+# PREREQUISITES
+# ------------------------------------------------------------------
+Write-Section "Checking Prerequisites"
 $prereqsFailed = $false
 
-# Java
 $javaExe = Find-Java
 if ($javaExe) {
-    $javaVer = & $javaExe -version 2>&1 | Select-String "version" | Select-Object -First 1
-    Write-Host "  [OK] Java     : $javaExe" -ForegroundColor Green
-    Write-Host "                  $javaVer" -ForegroundColor DarkGray
+    $jv = (& $javaExe -version 2>&1 | Where-Object { $_ -match "version" } | Select-Object -First 1).ToString().Trim()
+    Write-OK "Java    $jv"
+    Write-Info "$javaExe"
 } else {
-    Write-Host "  [MISSING] Java — download from https://adoptium.net" -ForegroundColor Red
+    Write-Fail "Java not found  ->  https://adoptium.net"
     $prereqsFailed = $true
 }
 
-# Node / npm
 $npmCmd = Get-Command npm -ErrorAction SilentlyContinue
 if ($npmCmd) {
-    $npmVer = & npm --version 2>&1
-    Write-Host "  [OK] npm      : $($npmCmd.Source) (v$npmVer)" -ForegroundColor Green
+    $nv = (& npm --version 2>&1).ToString().Trim()
+    Write-OK "npm     v$nv"
+    Write-Info "$($npmCmd.Source)"
 } else {
-    Write-Host "  [MISSING] npm — download from https://nodejs.org" -ForegroundColor Red
+    Write-Fail "npm not found  ->  https://nodejs.org"
     $prereqsFailed = $true
 }
 
-# Ruby
 $rubyBin = Find-RubyBin
 if ($rubyBin) {
-    $rubyVer = & ruby --version 2>&1
-    Write-Host "  [OK] Ruby     : $rubyBin" -ForegroundColor Green
-    Write-Host "                  $rubyVer" -ForegroundColor DarkGray
+    $rv = (& ruby --version 2>&1).ToString().Trim()
+    Write-OK "Ruby    $rv"
+    Write-Info "$rubyBin"
 } else {
-    Write-Host "  [MISSING] Ruby — download from https://rubyinstaller.org" -ForegroundColor Red
+    Write-Fail "Ruby not found  ->  https://rubyinstaller.org"
     $prereqsFailed = $true
 }
 
 if ($prereqsFailed) {
     Write-Host ""
-    Write-Host "  One or more prerequisites are missing. Install them and re-run." -ForegroundColor Red
+    Write-Host "  Install missing prerequisites then re-run." -ForegroundColor Red
+    Write-Host ""
     exit 1
 }
 
 $gemBin = Find-GemBin
 Patch-SessionPath -javaExe $javaExe -rubyBin $rubyBin -gemBin $gemBin -projectRoot $targetDir
 
-# ─────────────────────────────────────────────────────────────
-# COLLECT IG DETAILS
-# ─────────────────────────────────────────────────────────────
-Write-Host ""
-Write-Host "  Configure your IG" -ForegroundColor Cyan
-Write-Host "  ────────────────────────────────────────" -ForegroundColor DarkGray
-Write-Host "  Press Enter to accept the default shown in [brackets]." -ForegroundColor DarkGray
+# ------------------------------------------------------------------
+# IG DETAILS
+# ------------------------------------------------------------------
+Write-Section "Configure Your IG"
+Write-Host "  Press Enter to accept defaults shown in [brackets]." -ForegroundColor DarkGray
 Write-Host ""
 
-function Prompt-Value {
-    param([string]$Label, [string]$Default, [string]$Hint = "")
-    $display = if ($Default) { " [$Default]" } else { "" }
-    if ($Hint) { Write-Host "  $Hint" -ForegroundColor DarkGray }
-    $val = Read-Host "  $Label$display"
-    if ([string]::IsNullOrWhiteSpace($val)) { return $Default }
-    return $val.Trim()
-}
-
-$igTitle     = Prompt-Value "IG Title"       "My FHIR Implementation Guide"  "Human-readable name"
-$igId        = Prompt-Value "Package ID"     "my.fhir.ig"                    "NPM-style, e.g. hl7.fhir.us.myig"
+$igTitle     = Prompt-Value "IG Title"       "My FHIR Implementation Guide" "Human-readable name shown in the IG website"
+$igId        = Prompt-Value "Package ID"     "my.fhir.ig"                   "NPM-style, e.g. hl7.fhir.us.myig"
 $igName      = Prompt-Value "IG Name"        ($igId -replace '[^a-zA-Z0-9]','') "PascalCase, no spaces"
-$canonical   = Prompt-Value "Canonical URL"  "http://example.org/fhir/$igId" "Base URL for all artifacts"
+$canonical   = Prompt-Value "Canonical URL"  "http://example.org/fhir/$igId" "Persistent base URL for all artifacts"
 $version     = Prompt-Value "Version"        "0.1.0"
-$fhirVersion = Prompt-Value "FHIR Version"   "4.0.1"                         "4.0.1 (R4) | 4.3.0 (R4B) | 5.0.0 (R5)"
-$status      = Prompt-Value "Status"         "draft"                         "draft | active | retired"
+$fhirVersion = Prompt-Value "FHIR Version"   "4.0.1"                        "4.0.1 (R4) | 4.3.0 (R4B) | 5.0.0 (R5)"
+$status      = Prompt-Value "Status"         "draft"                        "draft | active | retired"
 $publisher   = Prompt-Value "Publisher Name" "My Organization"
 $pubUrl      = Prompt-Value "Publisher URL"  "http://example.org"
 $pubEmail    = Prompt-Value "Publisher Email" ""
 
 Write-Host ""
-Write-Host "  IG Details" -ForegroundColor Cyan
-Write-Host "    Title     : $igTitle"
-Write-Host "    ID        : $igId"
-Write-Host "    Canonical : $canonical"
-Write-Host "    Version   : $version ($fhirVersion)"
+Write-Host "  +-------------------------------------------------+" -ForegroundColor DarkGray
+Write-Host "  |  $($igTitle.PadRight(47))|" -ForegroundColor White
+Write-Host "  |  ID        : $($igId.PadRight(35))|" -ForegroundColor DarkGray
+Write-Host "  |  Canonical : $($canonical.PadRight(35))|" -ForegroundColor DarkGray
+Write-Host "  |  Version   : $("$version ($fhirVersion)".PadRight(35))|" -ForegroundColor DarkGray
+Write-Host "  +-------------------------------------------------+" -ForegroundColor DarkGray
 Write-Host ""
+
 $confirm = Read-Host "  Create this IG? [Y/n]"
-if ($confirm -match '^[Nn]') { Write-Host "  Aborted." -ForegroundColor Yellow; exit 0 }
+if ($confirm -match '^[Nn]') {
+    Write-Warn "Aborted."
+    Write-Host ""
+    exit 0
+}
 
-# ─────────────────────────────────────────────────────────────
-# FOLDER STRUCTURE
-# ─────────────────────────────────────────────────────────────
-Write-Host ""
-Write-Host "  Creating folder structure..." -ForegroundColor Cyan
+# ------------------------------------------------------------------
+# BUILD PROJECT
+# ------------------------------------------------------------------
+Write-Section "Building Project"
 
-$dirs = @(
-    "input\fsh\profiles",
-    "input\fsh\extensions",
-    "input\fsh\valuesets",
-    "input\fsh\codesystems",
-    "input\fsh\instances",
-    "input\pagecontent",
-    "input\images",
-    "input\includes",
-    "input\intro-notes",
-    "input-cache"
-)
-foreach ($d in $dirs) {
+# Folders
+Start-Spinner "Creating folder structure..."
+foreach ($d in @(
+    "input\fsh\profiles", "input\fsh\extensions", "input\fsh\valuesets",
+    "input\fsh\codesystems", "input\fsh\instances", "input\pagecontent",
+    "input\images", "input\includes", "input\intro-notes", "input-cache"
+)) {
     New-Item -ItemType Directory -Force -Path "$targetDir\$d" | Out-Null
 }
-Write-Host "  [OK] Folders created." -ForegroundColor Green
+Stop-Spinner "Folder structure created"
 
-# ─────────────────────────────────────────────────────────────
-# WRITE CONFIG FILES
-# ─────────────────────────────────────────────────────────────
-Write-Host "  Writing configuration files..." -ForegroundColor Cyan
-
-# sushi-config.yaml
+# Config files
+Start-Spinner "Writing config files..."
+$year = (Get-Date).Year
 $emailLine = if ($pubEmail) { "`n      - system: email`n        value: $pubEmail" } else { "" }
-@"
-id: $igId
-canonical: $canonical
-name: $igName
-title: "$igTitle"
-status: $status
-version: $version
-fhirVersion: $fhirVersion
-releaseLabel: CI Build
-license: CC0-1.0
-copyrightYear: $(Get-Date -Format yyyy)+
 
-publisher:
-  name: $publisher
-  url: $pubUrl$emailLine
+$sushiConfig = "id: $igId`ncanonical: $canonical`nname: $igName`ntitle: `"$igTitle`"`nstatus: $status`nversion: $version`nfhirVersion: $fhirVersion`nreleaseLabel: CI Build`nlicense: CC0-1.0`ncopyrightYear: ${year}+`n`npublisher:`n  name: $publisher`n  url: $pubUrl$emailLine`n`ndependencies:`n  hl7.terminology.r4: 6.0.0`n  # hl7.fhir.us.core: 6.1.0`n`npages:`n  index.md:`n    title: Home`n  artifacts.html:`n    title: Artifacts`n`nmenu:`n  Home: index.html`n  Artifacts: artifacts.html`n`nparameters:`n  show-inherited-invariants: false`n  excludettl: true`n"
+Set-Content -Path "$targetDir\sushi-config.yaml" -Value $sushiConfig -Encoding UTF8
 
-dependencies:
-  hl7.terminology.r4: 6.0.0
-  # Add more dependencies here, e.g:
-  # hl7.fhir.us.core: 6.1.0
+Set-Content -Path "$targetDir\ig.ini" -Value "[IG]`nig = fsh-generated/resources/ImplementationGuide-$igId.json`ntemplate = hl7.fhir.template#current`nusage-stats-opt-out = true`n" -Encoding UTF8
+Set-Content -Path "$targetDir\.gitignore" -Value "input-cache/`noutput/`ntemp/`ntemplate/`ntxcache/`n*.log`n.DS_Store`n" -Encoding UTF8
+Stop-Spinner "Config files written"
 
-pages:
-  index.md:
-    title: Home
-  artifacts.html:
-    title: Artifacts
+# Starter FSH
+Start-Spinner "Writing starter FSH and pages..."
+Set-Content -Path "$targetDir\input\fsh\aliases.fsh" -Value "// Common terminology aliases`nAlias: ``$SCT   = http://snomed.info/sct`nAlias: ``$LOINC = http://loinc.org`nAlias: ``$UCUM  = http://unitsofmeasure.org`nAlias: ``$ICD10 = http://hl7.org/fhir/sid/icd-10-cm`n" -Encoding UTF8
+Set-Content -Path "$targetDir\input\fsh\profiles\.gitkeep"  -Value "// Add profile .fsh files here`n" -Encoding UTF8
+Set-Content -Path "$targetDir\input\pagecontent\index.md"   -Value "### Introduction`n`n**$igTitle** - version $version`n`nThis implementation guide defines...`n`n### Scope`n`n### Authors and Contributors`n`n| Name | Role |`n|------|------|`n| $publisher | Publisher |`n" -Encoding UTF8
+Set-Content -Path "$targetDir\input\includes\menu.xml"      -Value "<ul xmlns=`"http://www.w3.org/1999/xhtml`" class=`"nav navbar-nav`">`n  <li><a href=`"index.html`">Home</a></li>`n  <li><a href=`"artifacts.html`">Artifacts</a></li>`n</ul>`n" -Encoding UTF8
+Stop-Spinner "Starter FSH and pages written"
 
-menu:
-  Home: index.html
-  Artifacts: artifacts.html
+# package.json + SUSHI
+Set-Content -Path "$targetDir\package.json" -Value "{`n  `"name`": `"$igId`",`n  `"private`": true,`n  `"devDependencies`": {`n    `"fsh-sushi`": `"3.x`"`n  },`n  `"scripts`": {`n    `"sushi`": `"sushi build .`",`n    `"dev`": `"powershell -ExecutionPolicy Bypass -File dev.ps1`"`n  }`n}`n" -Encoding UTF8
 
-parameters:
-  show-inherited-invariants: false
-  excludettl: true
-"@ | Set-Content "$targetDir\sushi-config.yaml" -Encoding UTF8
-
-# ig.ini
-@"
-[IG]
-ig = fsh-generated/resources/ImplementationGuide-$igId.json
-template = hl7.fhir.template#current
-usage-stats-opt-out = true
-"@ | Set-Content "$targetDir\ig.ini" -Encoding UTF8
-
-# .gitignore
-@"
-input-cache/
-output/
-temp/
-template/
-txcache/
-*.log
-.DS_Store
-"@ | Set-Content "$targetDir\.gitignore" -Encoding UTF8
-
-Write-Host "  [OK] sushi-config.yaml, ig.ini, .gitignore written." -ForegroundColor Green
-
-# ─────────────────────────────────────────────────────────────
-# WRITE STARTER FSH
-# ─────────────────────────────────────────────────────────────
-
-# aliases.fsh
-@"
-// Common terminology aliases — add more as needed
-Alias: `$SCT    = http://snomed.info/sct
-Alias: `$LOINC  = http://loinc.org
-Alias: `$UCUM   = http://unitsofmeasure.org
-Alias: `$ICD10  = http://hl7.org/fhir/sid/icd-10-cm
-Alias: `$RXN    = http://www.nlm.nih.gov/research/umls/rxnorm
-"@ | Set-Content "$targetDir\input\fsh\aliases.fsh" -Encoding UTF8
-
-# Starter profile placeholder
-@"
-// TODO: Define your profiles here
-// Example:
-//
-// Profile:     MyPatient
-// Parent:      Patient
-// Id:          my-patient
-// Title:       "My Patient Profile"
-// Description: "Patient profile for this IG."
-// * name 1..* MS
-// * birthDate 1..1 MS
-"@ | Set-Content "$targetDir\input\fsh\profiles\.gitkeep" -Encoding UTF8
-
-# ─────────────────────────────────────────────────────────────
-# WRITE PAGES
-# ─────────────────────────────────────────────────────────────
-
-@"
-### Introduction
-
-**$igTitle** — version $version
-
-This implementation guide defines...
-
-### Scope
-
-### Authors and Contributors
-
-| Name | Role |
-|------|------|
-| $publisher | Publisher |
-
-### Dependencies
-
-This IG depends on the following published IGs:
-
-| IG | Version |
-|----|---------|
-| HL7 Terminology | 6.0.0 |
-"@ | Set-Content "$targetDir\input\pagecontent\index.md" -Encoding UTF8
-
-# menu.xml
-@"
-<ul xmlns="http://www.w3.org/1999/xhtml" class="nav navbar-nav">
-  <li><a href="index.html">Home</a></li>
-  <li><a href="artifacts.html">Artifacts</a></li>
-</ul>
-"@ | Set-Content "$targetDir\input\includes\menu.xml" -Encoding UTF8
-
-Write-Host "  [OK] Starter FSH, pages, and menu written." -ForegroundColor Green
-
-# ─────────────────────────────────────────────────────────────
-# PACKAGE.JSON + SUSHI
-# ─────────────────────────────────────────────────────────────
-Write-Host "  Installing SUSHI locally..." -ForegroundColor Cyan
-
-@"
-{
-  "name": "$igId",
-  "private": true,
-  "devDependencies": {
-    "fsh-sushi": "3.x"
-  },
-  "scripts": {
-    "sushi": "sushi build .",
-    "dev": "powershell -ExecutionPolicy Bypass -File dev.ps1"
-  }
+Start-Spinner "Installing SUSHI..."
+$npmOut = & npm install --prefix "$targetDir" 2>&1
+$npmOK = ($LASTEXITCODE -eq 0)
+if ($npmOK) {
+    $sv = & npx --prefix "$targetDir" sushi --version 2>&1
+    Stop-Spinner "SUSHI v$sv installed"
+} else {
+    Stop-Spinner "SUSHI install failed" -OK $false
+    Write-Host $npmOut -ForegroundColor Red
+    exit 1
 }
-"@ | Set-Content "$targetDir\package.json" -Encoding UTF8
 
-& npm install --prefix "$targetDir"
-if ($LASTEXITCODE -ne 0) { throw "npm install failed." }
-Write-Host "  [OK] SUSHI installed." -ForegroundColor Green
-
-# ─────────────────────────────────────────────────────────────
-# JEKYLL
-# ─────────────────────────────────────────────────────────────
+# Jekyll
 $jekyll = Get-Command jekyll -ErrorAction SilentlyContinue
 if (-not $jekyll) {
-    Write-Host "  Installing Jekyll..." -ForegroundColor Cyan
-    & gem install jekyll bundler
-    if ($LASTEXITCODE -ne 0) { Write-Host "  WARNING: Jekyll install failed — build may not work." -ForegroundColor Yellow }
-    else { Write-Host "  [OK] Jekyll installed." -ForegroundColor Green }
-} else {
-    Write-Host "  [OK] Jekyll already installed." -ForegroundColor Green
-}
-
-# ─────────────────────────────────────────────────────────────
-# DOWNLOAD publisher.jar
-# ─────────────────────────────────────────────────────────────
-$publisherJar = "$targetDir\input-cache\publisher.jar"
-if (-not (Test-Path $publisherJar)) {
-    Write-Host "  Downloading IG Publisher (this may take a minute)..." -ForegroundColor Cyan
-    $publisherUrl = "https://github.com/HL7/fhir-ig-publisher/releases/latest/download/publisher.jar"
-    Invoke-WebRequest -Uri $publisherUrl -OutFile $publisherJar
-    Write-Host "  [OK] publisher.jar downloaded." -ForegroundColor Green
-} else {
-    Write-Host "  [OK] publisher.jar already present." -ForegroundColor Green
-}
-
-# ─────────────────────────────────────────────────────────────
-# COPY dev.ps1 INTO THE NEW PROJECT
-# ─────────────────────────────────────────────────────────────
-$devScriptSource = "$scriptDir\dev.ps1"
-$devScriptDest   = "$targetDir\dev.ps1"
-if (Test-Path $devScriptSource) {
-    if ($targetDir -ne $scriptDir) {
-        Copy-Item $devScriptSource $devScriptDest -Force
-        Write-Host "  [OK] dev.ps1 copied into project." -ForegroundColor Green
+    Start-Spinner "Installing Jekyll..."
+    $gemOut = & gem install jekyll bundler 2>&1
+    $gemOK = ($LASTEXITCODE -eq 0)
+    if ($gemOK) {
+        Stop-Spinner "Jekyll installed"
+    } else {
+        Stop-Spinner "Jekyll install failed (build may not work)" -OK $false
     }
 } else {
-    Write-Host "  WARNING: dev.ps1 not found at $devScriptSource — skipping copy." -ForegroundColor Yellow
-    Write-Host "           Run dev.ps1 from the fhirlighter directory manually." -ForegroundColor DarkGray
+    $jv = (& jekyll --version 2>&1).ToString().Trim()
+    Write-OK "Jekyll already installed  ($jv)"
 }
 
-# ─────────────────────────────────────────────────────────────
-# DONE
-# ─────────────────────────────────────────────────────────────
+# publisher.jar
+$publisherJar = "$targetDir\input-cache\publisher.jar"
+if (-not (Test-Path $publisherJar)) {
+    Start-Spinner "Downloading IG Publisher..."
+    $publisherUrl = "https://github.com/HL7/fhir-ig-publisher/releases/latest/download/publisher.jar"
+    try {
+        Invoke-WebRequest -Uri $publisherUrl -OutFile $publisherJar -UseBasicParsing
+        $sizeMB = [math]::Round((Get-Item $publisherJar).Length / 1MB, 0)
+        Stop-Spinner "IG Publisher downloaded  (${sizeMB} MB)"
+    } catch {
+        Stop-Spinner "IG Publisher download failed" -OK $false
+        Write-Warn "Try running dev.ps1 to retry the download."
+    }
+} else {
+    $sizeMB = [math]::Round((Get-Item $publisherJar).Length / 1MB, 0)
+    Write-OK "IG Publisher already present  (${sizeMB} MB)"
+}
+
+# Copy dev.ps1
+$devSrc  = "$scriptDir\dev.ps1"
+$devDest = "$targetDir\dev.ps1"
+if ((Test-Path $devSrc) -and ($targetDir -ne $scriptDir)) {
+    Start-Spinner "Copying dev.ps1..."
+    Copy-Item $devSrc $devDest -Force
+    Stop-Spinner "dev.ps1 copied"
+} elseif (-not (Test-Path $devSrc)) {
+    Write-Warn "dev.ps1 not found at $devSrc - copy it manually"
+}
+
+# ------------------------------------------------------------------
+# SUMMARY
+# ------------------------------------------------------------------
 Write-Host ""
-Write-Host "  ────────────────────────────────────────" -ForegroundColor DarkGray
-Write-Host "  IG scaffolded successfully." -ForegroundColor Green
+Write-Host "  +=====================================================+" -ForegroundColor Cyan
+Write-Host "  |                                                     |" -ForegroundColor Cyan
+Write-Host "  |   $C_CHECK  Project created successfully!                  |" -ForegroundColor Cyan
+Write-Host "  |                                                     |" -ForegroundColor Cyan
+Write-Host "  |   $igTitle" -ForegroundColor White -NoNewline
+Write-Host (" " * (52 - $igTitle.Length)) -NoNewline
+Write-Host "|" -ForegroundColor Cyan
+Write-Host "  |   v$version  ($fhirVersion)$((" " * (46 - $version.Length - $fhirVersion.Length)))|" -ForegroundColor DarkGray
+Write-Host "  |                                                     |" -ForegroundColor Cyan
+Write-Host "  +=====================================================+" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  Project structure:" -ForegroundColor DarkGray
+Write-Host "    $(Split-Path $targetDir -Leaf)/"
+Write-Host "    +-- sushi-config.yaml"
+Write-Host "    +-- ig.ini"
+Write-Host "    +-- dev.ps1"
+Write-Host "    +-- input/"
+Write-Host "    |   +-- fsh/          <-- write your FSH here"
+Write-Host "    |   +-- pagecontent/  <-- write your docs here"
+Write-Host "    +-- input-cache/"
+Write-Host "        +-- publisher.jar"
 Write-Host ""
 Write-Host "  Next steps:" -ForegroundColor Cyan
-Write-Host "    1. Edit input\fsh\profiles\ to define your profiles"
-Write-Host "    2. Edit input\pagecontent\index.md with your IG narrative"
-Write-Host "    3. Run dev.ps1 to start a build session"
+Write-Host "    1. Edit input\fsh\profiles\  to define your profiles"
+Write-Host "    2. Edit input\pagecontent\index.md  with your narrative"
+Write-Host "    3. Run .\dev.ps1  to start a build session"
 Write-Host ""

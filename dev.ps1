@@ -1,250 +1,327 @@
-# dev.ps1 — FHIR IG development session
-# Run this at the start of every dev session inside an IG project directory.
-$ErrorActionPreference = "Stop"
+# dev.ps1 - FHIR IG development session
+$ErrorActionPreference = "Continue"
 $projectRoot = $PSScriptRoot
 
-# ─────────────────────────────────────────────────────────────
-# SHARED TOOL DISCOVERY
-# ─────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------
+# UNICODE CHARS
+# ------------------------------------------------------------------
+$C_CHECK  = [char]0x2713
+$C_CROSS  = [char]0x2717
+$C_WARN   = [char]0x25B6
+$C_DOT    = [char]0x25CF
+$C_SPIN   = @(
+    [char]0x280B, [char]0x2819, [char]0x2839, [char]0x2838,
+    [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827,
+    [char]0x2807, [char]0x280F
+)
+
+# ------------------------------------------------------------------
+# SPINNER
+# ------------------------------------------------------------------
+$script:SpinPS = $null
+$script:SpinRS = $null
+
+function Start-Spinner {
+    param([string]$Message)
+    $script:SpinRS = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $script:SpinRS.Open()
+    $script:SpinPS = [System.Management.Automation.PowerShell]::Create()
+    $script:SpinPS.Runspace = $script:SpinRS
+    [void]$script:SpinPS.AddScript({
+        param($msg, $frames)
+        $i = 0
+        while ($true) {
+            [Console]::Write("`r  $($frames[$i % $frames.Length])  $msg   ")
+            [System.Threading.Thread]::Sleep(80)
+            $i++
+        }
+    }).AddArgument($Message).AddArgument($C_SPIN)
+    $script:SpinHandle = $script:SpinPS.BeginInvoke()
+}
+
+function Stop-Spinner {
+    param([string]$Message, [bool]$OK = $true)
+    try { $script:SpinPS.Stop()    } catch {}
+    try { $script:SpinPS.Dispose() } catch {}
+    try { $script:SpinRS.Close()   } catch {}
+    try { $script:SpinRS.Dispose() } catch {}
+    $pad = " " * 50
+    if ($OK) {
+        Write-Host "`r  $C_CHECK  $Message$pad" -ForegroundColor Green
+    } else {
+        Write-Host "`r  $C_CROSS  $Message$pad" -ForegroundColor Red
+    }
+}
+
+# ------------------------------------------------------------------
+# OUTPUT HELPERS
+# ------------------------------------------------------------------
+function Write-Section {
+    param([string]$Title)
+    Write-Host ""
+    Write-Host "  $Title" -ForegroundColor White
+    Write-Host "  $("-" * 44)" -ForegroundColor DarkGray
+}
+
+function Write-OK   { param([string]$Msg) Write-Host "  $C_CHECK  $Msg" -ForegroundColor Green  }
+function Write-Fail { param([string]$Msg) Write-Host "  $C_CROSS  $Msg" -ForegroundColor Red    }
+function Write-Warn { param([string]$Msg) Write-Host "  $C_WARN   $Msg" -ForegroundColor Yellow }
+function Write-Info { param([string]$Msg) Write-Host "  $C_DOT    $Msg" -ForegroundColor DarkGray }
+
+# ------------------------------------------------------------------
+# TOOL DISCOVERY
+# ------------------------------------------------------------------
 function Find-Java {
-    $java = Get-Command java -ErrorAction SilentlyContinue
-    if ($java) { return $java.Source }
-    $candidates = @(
+    $j = Get-Command java -ErrorAction SilentlyContinue
+    if ($j) { return $j.Source }
+    foreach ($base in @(
         "$env:ProgramFiles\Java",
         "$env:ProgramFiles\Eclipse Adoptium",
         "$env:ProgramFiles\Microsoft",
         "$env:ProgramFiles\OpenJDK",
         "$env:LOCALAPPDATA\Programs\Eclipse Adoptium",
         "$env:LOCALAPPDATA\Programs\OpenJDK"
-    )
-    foreach ($base in $candidates) {
+    )) {
         if (Test-Path $base) {
-            $found = Get-ChildItem $base -Recurse -Filter "java.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($found) { return $found.FullName }
+            $f = Get-ChildItem $base -Recurse -Filter "java.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($f) { return $f.FullName }
         }
     }
     return $null
 }
 
 function Find-RubyBin {
-    $ruby = Get-Command ruby -ErrorAction SilentlyContinue
-    if ($ruby) { return Split-Path $ruby.Source }
-    $found = Get-ChildItem "C:\Ruby*\bin\ruby.exe" -ErrorAction SilentlyContinue |
-             Sort-Object FullName -Descending | Select-Object -First 1
-    if ($found) { return Split-Path $found.FullName }
-    $found = Get-ChildItem "$env:LOCALAPPDATA\Programs\Ruby*\bin\ruby.exe" -ErrorAction SilentlyContinue |
-             Sort-Object FullName -Descending | Select-Object -First 1
-    if ($found) { return Split-Path $found.FullName }
+    $r = Get-Command ruby -ErrorAction SilentlyContinue
+    if ($r) { return Split-Path $r.Source }
+    $f = Get-ChildItem "C:\Ruby*\bin\ruby.exe" -ErrorAction SilentlyContinue |
+         Sort-Object FullName -Descending | Select-Object -First 1
+    if ($f) { return Split-Path $f.FullName }
+    $f = Get-ChildItem "$env:LOCALAPPDATA\Programs\Ruby*\bin\ruby.exe" -ErrorAction SilentlyContinue |
+         Sort-Object FullName -Descending | Select-Object -First 1
+    if ($f) { return Split-Path $f.FullName }
     return $null
 }
 
 function Find-GemBin {
-    $ruby = Get-Command ruby -ErrorAction SilentlyContinue
-    if ($ruby) {
-        $gemBin = & ruby -e "puts Gem.bindir" 2>$null
-        if ($gemBin -and (Test-Path $gemBin.Trim())) { return $gemBin.Trim() }
+    $r = Get-Command ruby -ErrorAction SilentlyContinue
+    if ($r) {
+        $g = & ruby -e "puts Gem.bindir" 2>$null
+        if ($g -and (Test-Path $g.Trim())) { return $g.Trim() }
     }
     return $null
 }
 
-# ─────────────────────────────────────────────────────────────
-# HEADER
-# ─────────────────────────────────────────────────────────────
-Write-Host ""
-Write-Host "  FHIR IG Dev Session" -ForegroundColor Cyan
-Write-Host "  ────────────────────────────────────────" -ForegroundColor DarkGray
+# ==================================================================
+# MAIN
+# ==================================================================
 
-# Read IG title from sushi-config.yaml if present
+# ------------------------------------------------------------------
+# HEADER
+# ------------------------------------------------------------------
 $igLabel = Split-Path $projectRoot -Leaf
 if (Test-Path "$projectRoot\sushi-config.yaml") {
-    $titleLine = Get-Content "$projectRoot\sushi-config.yaml" |
-                 Where-Object { $_ -match '^\s*title\s*:' } |
-                 Select-Object -First 1
-    if ($titleLine -match ':\s*[''"]?(.+?)[''"]?\s*$') {
-        $igLabel = $matches[1]
-    }
+    $tl = Get-Content "$projectRoot\sushi-config.yaml" |
+          Where-Object { $_ -match '^\s*title\s*:' } |
+          Select-Object -First 1
+    if ($tl -match ':\s*[''"]?(.+?)[''"]?\s*$') { $igLabel = $matches[1] }
 }
-Write-Host "  Project : $igLabel" -ForegroundColor White
-Write-Host "  Dir     : $projectRoot" -ForegroundColor DarkGray
-Write-Host ""
 
-# ─────────────────────────────────────────────────────────────
-# GUARD — must be an IG project
-# ─────────────────────────────────────────────────────────────
+$igVer = ""
+if (Test-Path "$projectRoot\sushi-config.yaml") {
+    $vl = Get-Content "$projectRoot\sushi-config.yaml" |
+          Where-Object { $_ -match '^\s*version\s*:' } |
+          Select-Object -First 1
+    if ($vl -match ':\s*(.+?)\s*$') { $igVer = "  v$($matches[1])" }
+}
+
+Write-Host ""
+Write-Host "  +--------------------------------------------+" -ForegroundColor DarkCyan
+Write-Host "  |  FHIR IG Dev Session                       |" -ForegroundColor DarkCyan
+Write-Host "  |  $($igLabel.PadRight(42))  |" -ForegroundColor White
+Write-Host "  |  $($projectRoot.PadRight(42))  |" -ForegroundColor DarkGray
+Write-Host "  +--------------------------------------------+" -ForegroundColor DarkCyan
+
+# ------------------------------------------------------------------
+# GUARD
+# ------------------------------------------------------------------
 if (-not (Test-Path "$projectRoot\sushi-config.yaml")) {
-    Write-Host "  ERROR: sushi-config.yaml not found." -ForegroundColor Red
-    Write-Host "  Run this script from inside an IG project directory." -ForegroundColor Red
-    Write-Host "  To scaffold a new IG, run init-ig.ps1 instead." -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Fail "sushi-config.yaml not found."
+    Write-Info "Run this from inside an IG project, or run init-ig.ps1 to scaffold a new one."
+    Write-Host ""
     exit 1
 }
 
-# ─────────────────────────────────────────────────────────────
-# PREREQUISITE CHECKS + PATH PATCHING
-# ─────────────────────────────────────────────────────────────
-Write-Host "  Checking environment..." -ForegroundColor Cyan
+# ------------------------------------------------------------------
+# ENVIRONMENT CHECKS
+# ------------------------------------------------------------------
+Write-Section "Checking Environment"
 $prereqsFailed = $false
 
 $javaExe = Find-Java
 if ($javaExe) {
-    Write-Host "  [OK] Java     : $javaExe" -ForegroundColor Green
+    Write-OK "Java    $javaExe"
 } else {
-    Write-Host "  [MISSING] Java — https://adoptium.net" -ForegroundColor Red
+    Write-Fail "Java not found  ->  https://adoptium.net"
     $prereqsFailed = $true
 }
 
 $npmCmd = Get-Command npm -ErrorAction SilentlyContinue
 if ($npmCmd) {
-    Write-Host "  [OK] npm      : $($npmCmd.Source)" -ForegroundColor Green
+    Write-OK "npm     $($npmCmd.Source)"
 } else {
-    Write-Host "  [MISSING] npm — https://nodejs.org" -ForegroundColor Red
+    Write-Fail "npm not found  ->  https://nodejs.org"
     $prereqsFailed = $true
 }
 
 $rubyBin = Find-RubyBin
 if ($rubyBin) {
-    Write-Host "  [OK] Ruby     : $rubyBin" -ForegroundColor Green
+    Write-OK "Ruby    $rubyBin"
 } else {
-    Write-Host "  [MISSING] Ruby — https://rubyinstaller.org" -ForegroundColor Red
+    Write-Fail "Ruby not found  ->  https://rubyinstaller.org"
     $prereqsFailed = $true
 }
 
 if ($prereqsFailed) {
     Write-Host ""
-    Write-Host "  Fix the above before continuing." -ForegroundColor Red
+    Write-Host "  Fix missing prerequisites then re-run." -ForegroundColor Red
+    Write-Host ""
     exit 1
 }
 
-# Patch session PATH
 $gemBin = Find-GemBin
 $env:JAVA_HOME = Split-Path (Split-Path $javaExe)
-$additions = @( (Split-Path $javaExe), $rubyBin, $gemBin, "$projectRoot\node_modules\.bin" )
-foreach ($p in $additions) {
-    if ($p -and $env:PATH -notlike "*$p*") { $env:PATH = "$p;$env:PATH" }
+foreach ($p in @((Split-Path $javaExe), $rubyBin, $gemBin, "$projectRoot\node_modules\.bin")) {
+    if ($p -and ($env:PATH -notlike "*$p*")) { $env:PATH = "$p;$env:PATH" }
 }
-Write-Host "  [OK] Session PATH patched." -ForegroundColor Green
+Write-OK "Session PATH patched"
 
-# ─────────────────────────────────────────────────────────────
-# SUSHI — ensure local install
-# ─────────────────────────────────────────────────────────────
-Write-Host "  Checking SUSHI..." -ForegroundColor Cyan
-& npm install --prefix "$projectRoot" --silent
-if ($LASTEXITCODE -ne 0) { throw "npm install failed." }
-$sushiVer = & npx --prefix "$projectRoot" sushi --version 2>&1
-Write-Host "  [OK] SUSHI $sushiVer" -ForegroundColor Green
-
-# ─────────────────────────────────────────────────────────────
-# JEKYLL — install if missing
-# ─────────────────────────────────────────────────────────────
-$jekyll = Get-Command jekyll -ErrorAction SilentlyContinue
-if (-not $jekyll) {
-    Write-Host "  Jekyll not found — installing..." -ForegroundColor Yellow
-    & gem install jekyll bundler
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "  WARNING: Jekyll install failed. Full builds may not work." -ForegroundColor Yellow
-    } else {
-        Write-Host "  [OK] Jekyll installed." -ForegroundColor Green
-    }
+# SUSHI
+Start-Spinner "Checking SUSHI..."
+$npmOut = & npm install --prefix "$projectRoot" 2>&1
+if ($LASTEXITCODE -eq 0) {
+    $sv = (& npx --prefix "$projectRoot" sushi --version 2>&1).ToString().Trim()
+    Stop-Spinner "SUSHI v$sv ready"
 } else {
-    Write-Host "  [OK] Jekyll   : $($jekyll.Source)" -ForegroundColor Green
+    Stop-Spinner "SUSHI install failed" -OK $false
+    exit 1
 }
 
-# ─────────────────────────────────────────────────────────────
-# PUBLISHER.JAR — download if missing
-# ─────────────────────────────────────────────────────────────
+# Jekyll
+$jekyll = Get-Command jekyll -ErrorAction SilentlyContinue
+if ($jekyll) {
+    $jv = (& jekyll --version 2>&1).ToString().Trim()
+    Write-OK "Jekyll  $jv"
+} else {
+    Start-Spinner "Installing Jekyll..."
+    & gem install jekyll bundler 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Stop-Spinner "Jekyll installed"
+    } else {
+        Stop-Spinner "Jekyll install failed (builds may fail)" -OK $false
+    }
+}
+
+# publisher.jar
 $publisherJar = "$projectRoot\input-cache\publisher.jar"
 if (-not (Test-Path $publisherJar)) {
-    Write-Host "  publisher.jar not found — downloading..." -ForegroundColor Yellow
+    Start-Spinner "Downloading IG Publisher..."
     New-Item -ItemType Directory -Force -Path "$projectRoot\input-cache" | Out-Null
-    $url = "https://github.com/HL7/fhir-ig-publisher/releases/latest/download/publisher.jar"
-    Invoke-WebRequest -Uri $url -OutFile $publisherJar
-    Write-Host "  [OK] publisher.jar downloaded." -ForegroundColor Green
+    try {
+        Invoke-WebRequest -Uri "https://github.com/HL7/fhir-ig-publisher/releases/latest/download/publisher.jar" -OutFile $publisherJar -UseBasicParsing
+        $mb = [math]::Round((Get-Item $publisherJar).Length / 1MB, 0)
+        Stop-Spinner "IG Publisher downloaded  (${mb} MB)"
+    } catch {
+        Stop-Spinner "Download failed - check connection" -OK $false
+    }
 } else {
-    $jarSize = [math]::Round((Get-Item $publisherJar).Length / 1MB, 1)
-    Write-Host "  [OK] publisher.jar ($jarSize MB)" -ForegroundColor Green
+    $mb = [math]::Round((Get-Item $publisherJar).Length / 1MB, 0)
+    Write-OK "IG Publisher  (${mb} MB)"
 }
 
-# ─────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------
 # MENU
-# ─────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------
 Write-Host ""
-Write-Host "  ────────────────────────────────────────" -ForegroundColor DarkGray
-Write-Host "  What would you like to do?" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "    [1] Full build       (IG Publisher — generates website)" -ForegroundColor White
-Write-Host "    [2] SUSHI only       (compile FSH → JSON, no website)" -ForegroundColor White
-Write-Host "    [3] Watch mode       (rebuild automatically on file changes)" -ForegroundColor White
-Write-Host "    [4] Update publisher (download latest publisher.jar)" -ForegroundColor White
-Write-Host "    [5] Open QA report   (open output\qa.html in browser)" -ForegroundColor White
-Write-Host "    [6] Exit" -ForegroundColor DarkGray
+Write-Host "  +--------------------------------------------+" -ForegroundColor Cyan
+Write-Host "  |  What would you like to do?                |" -ForegroundColor Cyan
+Write-Host "  +--------------------------------------------+" -ForegroundColor Cyan
+Write-Host "  |                                            |" -ForegroundColor DarkGray
+Write-Host "  |   [1]  Full build       (website + QA)    |" -ForegroundColor White
+Write-Host "  |   [2]  SUSHI only       (FSH -> JSON)     |" -ForegroundColor White
+Write-Host "  |   [3]  Watch mode       (auto rebuild)    |" -ForegroundColor White
+Write-Host "  |   [4]  Update publisher (latest .jar)     |" -ForegroundColor White
+Write-Host "  |   [5]  Open QA report   (browser)         |" -ForegroundColor White
+Write-Host "  |   [6]  Exit                                |" -ForegroundColor DarkGray
+Write-Host "  |                                            |" -ForegroundColor DarkGray
+Write-Host "  +--------------------------------------------+" -ForegroundColor Cyan
 Write-Host ""
 
 $choice = Read-Host "  Enter choice [1-6]"
+Write-Host ""
 
 switch ($choice) {
-
     "1" {
+        Write-Host "  Starting full build..." -ForegroundColor Cyan
+        Write-Host "  First run may take 10-15 min (package downloads + terminology)." -ForegroundColor DarkGray
         Write-Host ""
-        Write-Host "  Running full build..." -ForegroundColor Cyan
-        Write-Host "  This may take several minutes on the first run." -ForegroundColor DarkGray
-        Write-Host ""
+        $start = Get-Date
         & $javaExe -Xmx4g -jar $publisherJar -ig "$projectRoot"
+        $elapsed = [math]::Round(((Get-Date) - $start).TotalSeconds)
         Write-Host ""
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "  Build complete." -ForegroundColor Green
-            Write-Host "  Open output\index.html to review the IG." -ForegroundColor DarkGray
-            Write-Host "  Open output\qa.html to review errors and warnings." -ForegroundColor DarkGray
+            Write-OK "Build complete  (${elapsed}s)"
+            Write-Info "output\index.html  - review the IG"
+            Write-Info "output\qa.html     - errors and warnings"
         } else {
-            Write-Host "  Build finished with errors. Check output\qa.html." -ForegroundColor Red
+            Write-Fail "Build finished with errors  (${elapsed}s)"
+            Write-Info "Check output\qa.html for details"
         }
     }
-
     "2" {
-        Write-Host ""
         Write-Host "  Running SUSHI..." -ForegroundColor Cyan
+        Write-Host ""
         & npx --prefix "$projectRoot" sushi build "$projectRoot"
+        Write-Host ""
         if ($LASTEXITCODE -eq 0) {
-            Write-Host ""
-            Write-Host "  SUSHI complete. JSON artifacts written to fsh-generated\resources\" -ForegroundColor Green
+            Write-OK "SUSHI complete  ->  fsh-generated\resources\"
         } else {
-            Write-Host ""
-            Write-Host "  SUSHI finished with errors." -ForegroundColor Red
+            Write-Fail "SUSHI finished with errors"
         }
     }
-
     "3" {
-        Write-Host ""
         Write-Host "  Starting watch mode..." -ForegroundColor Cyan
-        Write-Host "  The IG will rebuild automatically when files change." -ForegroundColor DarkGray
-        Write-Host "  Press Ctrl+C to stop." -ForegroundColor DarkGray
+        Write-Info "IG rebuilds automatically on file changes."
+        Write-Info "Press Ctrl+C to stop."
         Write-Host ""
         & $javaExe -Xmx4g -jar $publisherJar -ig "$projectRoot" -watch
     }
-
     "4" {
-        Write-Host ""
-        Write-Host "  Downloading latest publisher.jar..." -ForegroundColor Cyan
-        $url = "https://github.com/HL7/fhir-ig-publisher/releases/latest/download/publisher.jar"
-        Invoke-WebRequest -Uri $url -OutFile $publisherJar
-        $jarSize = [math]::Round((Get-Item $publisherJar).Length / 1MB, 1)
-        Write-Host "  [OK] publisher.jar updated ($jarSize MB)." -ForegroundColor Green
-    }
-
-    "5" {
-        $qaPath = "$projectRoot\output\qa.html"
-        if (Test-Path $qaPath) {
-            Start-Process $qaPath
-        } else {
-            Write-Host "  output\qa.html not found. Run a full build first." -ForegroundColor Yellow
+        Start-Spinner "Downloading latest IG Publisher..."
+        try {
+            Invoke-WebRequest -Uri "https://github.com/HL7/fhir-ig-publisher/releases/latest/download/publisher.jar" -OutFile $publisherJar -UseBasicParsing
+            $mb = [math]::Round((Get-Item $publisherJar).Length / 1MB, 0)
+            Stop-Spinner "IG Publisher updated  (${mb} MB)"
+        } catch {
+            Stop-Spinner "Download failed" -OK $false
         }
     }
-
+    "5" {
+        $qa = "$projectRoot\output\qa.html"
+        if (Test-Path $qa) {
+            Start-Process $qa
+            Write-OK "Opening output\qa.html"
+        } else {
+            Write-Warn "output\qa.html not found - run a full build first."
+        }
+    }
     "6" {
-        Write-Host "  Exiting." -ForegroundColor DarkGray
+        Write-Info "Goodbye."
+        Write-Host ""
         exit 0
     }
-
     default {
-        Write-Host "  Invalid choice." -ForegroundColor Yellow
+        Write-Warn "Invalid choice."
     }
 }
 

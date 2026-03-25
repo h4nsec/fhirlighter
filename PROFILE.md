@@ -23,11 +23,11 @@ Add the following — update `$FhirToolsDir` to wherever you cloned the repo:
 $FhirToolsDir = "C:\Users\your-user\dev-tools\fhirlighter"
 
 function New-FhirIG {
-    powershell -ExecutionPolicy Bypass -File "$FhirToolsDir\init-ig.ps1"
+    powershell -ExecutionPolicy Bypass -File "$FhirToolsDir\init-ig.ps1" @args
 }
 
 function Start-FhirIG {
-    powershell -ExecutionPolicy Bypass -File (Join-Path (Get-Location) "dev.ps1")
+    powershell -ExecutionPolicy Bypass -File (Join-Path (Get-Location) "dev.ps1") @args
 }
 ```
 
