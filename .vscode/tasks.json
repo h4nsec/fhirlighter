@@ -1,0 +1,80 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "FHIR: Dev Session",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File ${workspaceFolder}/dev.ps1",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "FHIR: Full Build",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -Command \"& { . ${workspaceFolder}/dev.ps1 }\" ",
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": [
+        {
+          "owner": "fhir-ig-publisher",
+          "fileLocation": ["relative", "${workspaceFolder}"],
+          "pattern": {
+            "regexp": "^.*ERROR.*\\((.+)\\):\\s+(.+)$",
+            "file": 1,
+            "message": 2
+          }
+        }
+      ]
+    },
+    {
+      "label": "FHIR: SUSHI Only",
+      "type": "shell",
+      "command": "npx sushi build .",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": [
+        {
+          "owner": "sushi",
+          "fileLocation": ["relative", "${workspaceFolder}/input/fsh"],
+          "pattern": {
+            "regexp": "^.*ERROR.*\\s+(.+\\.fsh),\\s+line (\\d+).*:\\s+(.+)$",
+            "file": 1,
+            "line": 2,
+            "message": 3
+          }
+        }
+      ]
+    },
+    {
+      "label": "FHIR: Init New IG",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File ${workspaceFolder}/init-ig.ps1",
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "fhirlighter",
+  "private": true,
+  "devDependencies": {
+    "fsh-sushi": "3.x"
+  },
+  "scripts": {
+    "sushi": "sushi build .",
+    "build": "powershell -ExecutionPolicy Bypass -File build.ps1"
+  }
+}
