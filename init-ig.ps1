@@ -88,6 +88,14 @@ function Write-Fail { param([string]$Msg) Write-Host "  $C_CROSS  $Msg" -Foregro
 function Write-Warn { param([string]$Msg) Write-Host "  $C_WARN   $Msg" -ForegroundColor Yellow  }
 function Write-Info { param([string]$Msg) Write-Host "  $C_DOT    $Msg" -ForegroundColor DarkGray }
 
+# Write UTF-8 without BOM - Set-Content -Encoding UTF8 adds BOM on PS 5.1
+# which breaks FSH and YAML parsers
+function Write-NoBOM {
+    param([string]$Path, [string]$Content)
+    $enc = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($Path, $Content, $enc)
+}
+
 # ------------------------------------------------------------------
 # TOOL DISCOVERY
 # ------------------------------------------------------------------
@@ -266,25 +274,27 @@ Stop-Spinner "Folder structure created"
 # Config files
 Start-Spinner "Writing config files..."
 $year = (Get-Date).Year
-$emailLine = if ($pubEmail) { "`n      - system: email`n        value: $pubEmail" } else { "" }
+$emailLine = if ($pubEmail) { "`n  email: $pubEmail" } else { "" }
 
-$sushiConfig = "id: $igId`ncanonical: $canonical`nname: $igName`ntitle: `"$igTitle`"`nstatus: $status`nversion: $version`nfhirVersion: $fhirVersion`nreleaseLabel: CI Build`nlicense: CC0-1.0`ncopyrightYear: ${year}+`n`npublisher:`n  name: $publisher`n  url: $pubUrl$emailLine`n`ndependencies:`n  hl7.terminology.r4: 6.0.0`n  # hl7.fhir.us.core: 6.1.0`n`npages:`n  index.md:`n    title: Home`n  artifacts.html:`n    title: Artifacts`n`nmenu:`n  Home: index.html`n  Artifacts: artifacts.html`n`nparameters:`n  show-inherited-invariants: false`n  excludettl: true`n"
-Set-Content -Path "$targetDir\sushi-config.yaml" -Value $sushiConfig -Encoding UTF8
+$sushiConfig = "id: $igId`ncanonical: $canonical`nname: $igName`ntitle: `"$igTitle`"`nstatus: $status`nversion: $version`nfhirVersion: $fhirVersion`nreleaseLabel: CI Build`nlicense: CC0-1.0`ncopyrightYear: ${year}+`n`npublisher:`n  name: $publisher`n  url: $pubUrl$emailLine`n`ndependencies:`n  hl7.terminology.r4: 5.5.0`n  # hl7.fhir.us.core: 6.1.0`n`npages:`n  index.md:`n    title: Home`n  artifacts.html:`n    title: Artifacts`n`nparameters:`n  show-inherited-invariants: false`n  excludettl: true`n"
+Write-NoBOM "$targetDir\sushi-config.yaml" $sushiConfig
 
-Set-Content -Path "$targetDir\ig.ini" -Value "[IG]`nig = fsh-generated/resources/ImplementationGuide-$igId.json`ntemplate = hl7.fhir.template#current`nusage-stats-opt-out = true`n" -Encoding UTF8
-Set-Content -Path "$targetDir\.gitignore" -Value "input-cache/`noutput/`ntemp/`ntemplate/`ntxcache/`n*.log`n.DS_Store`n" -Encoding UTF8
+# hl7.fhir.template enforces hl7. prefix on ID — use fhir.base.template for community IGs
+$igTemplate = if ($igId.StartsWith("hl7.")) { "hl7.fhir.template#current" } else { "fhir.base.template#current" }
+Write-NoBOM "$targetDir\ig.ini" "[IG]`nig = fsh-generated/resources/ImplementationGuide-$igId.json`ntemplate = $igTemplate`n"
+Write-NoBOM "$targetDir\.gitignore" "input-cache/`noutput/`ntemp/`ntemplate/`ntxcache/`n*.log`n.DS_Store`n"
 Stop-Spinner "Config files written"
 
 # Starter FSH
 Start-Spinner "Writing starter FSH and pages..."
-Set-Content -Path "$targetDir\input\fsh\aliases.fsh" -Value "// Common terminology aliases`nAlias: ``$SCT   = http://snomed.info/sct`nAlias: ``$LOINC = http://loinc.org`nAlias: ``$UCUM  = http://unitsofmeasure.org`nAlias: ``$ICD10 = http://hl7.org/fhir/sid/icd-10-cm`n" -Encoding UTF8
-Set-Content -Path "$targetDir\input\fsh\profiles\.gitkeep"  -Value "// Add profile .fsh files here`n" -Encoding UTF8
-Set-Content -Path "$targetDir\input\pagecontent\index.md"   -Value "### Introduction`n`n**$igTitle** - version $version`n`nThis implementation guide defines...`n`n### Scope`n`n### Authors and Contributors`n`n| Name | Role |`n|------|------|`n| $publisher | Publisher |`n" -Encoding UTF8
-Set-Content -Path "$targetDir\input\includes\menu.xml"      -Value "<ul xmlns=`"http://www.w3.org/1999/xhtml`" class=`"nav navbar-nav`">`n  <li><a href=`"index.html`">Home</a></li>`n  <li><a href=`"artifacts.html`">Artifacts</a></li>`n</ul>`n" -Encoding UTF8
+Write-NoBOM "$targetDir\input\fsh\aliases.fsh" "// Common terminology aliases`nAlias: ``$SCT   = http://snomed.info/sct`nAlias: ``$LOINC = http://loinc.org`nAlias: ``$UCUM  = http://unitsofmeasure.org`nAlias: ``$ICD10 = http://hl7.org/fhir/sid/icd-10-cm`n"
+Write-NoBOM "$targetDir\input\fsh\profiles\.gitkeep"  "// Add profile .fsh files here`n"
+Write-NoBOM "$targetDir\input\pagecontent\index.md"   "### Introduction`n`n**$igTitle** - version $version`n`nThis implementation guide defines...`n`n### Scope`n`n### Authors and Contributors`n`n| Name | Role |`n|------|------|`n| $publisher | Publisher |`n"
+Write-NoBOM "$targetDir\input\includes\menu.xml"      "<ul xmlns=`"http://www.w3.org/1999/xhtml`" class=`"nav navbar-nav`">`n  <li><a href=`"index.html`">Home</a></li>`n  <li><a href=`"artifacts.html`">Artifacts</a></li>`n</ul>`n"
 Stop-Spinner "Starter FSH and pages written"
 
 # package.json + SUSHI
-Set-Content -Path "$targetDir\package.json" -Value "{`n  `"name`": `"$igId`",`n  `"private`": true,`n  `"devDependencies`": {`n    `"fsh-sushi`": `"3.x`"`n  },`n  `"scripts`": {`n    `"sushi`": `"sushi build .`",`n    `"dev`": `"powershell -ExecutionPolicy Bypass -File dev.ps1`"`n  }`n}`n" -Encoding UTF8
+Write-NoBOM "$targetDir\package.json" "{`n  `"name`": `"$igId`",`n  `"private`": true,`n  `"devDependencies`": {`n    `"fsh-sushi`": `"3.x`"`n  },`n  `"scripts`": {`n    `"sushi`": `"sushi build .`",`n    `"dev`": `"powershell -ExecutionPolicy Bypass -File dev.ps1`"`n  }`n}`n"
 
 Start-Spinner "Installing SUSHI..."
 $npmOut = & npm install --prefix "$targetDir" 2>&1
