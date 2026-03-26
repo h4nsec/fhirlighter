@@ -139,10 +139,24 @@ function Find-GemBin {
     return $null
 }
 
+function Find-Git {
+    $g = Get-Command git -ErrorAction SilentlyContinue
+    if ($g) { return $g.Source }
+    foreach ($candidate in @(
+        "$env:ProgramFiles\Git\cmd\git.exe",
+        "$env:ProgramFiles\Git\bin\git.exe",
+        "$env:LOCALAPPDATA\Programs\Git\cmd\git.exe"
+    )) {
+        if (Test-Path $candidate) { return $candidate }
+    }
+    return $null
+}
+
 function Patch-SessionPath {
-    param([string]$javaExe, [string]$rubyBin, [string]$gemBin, [string]$projectRoot)
+    param([string]$javaExe, [string]$rubyBin, [string]$gemBin, [string]$projectRoot, [string]$gitExe)
     $env:JAVA_HOME = Split-Path (Split-Path $javaExe)
-    foreach ($p in @((Split-Path $javaExe), $rubyBin, $gemBin, "$projectRoot\node_modules\.bin")) {
+    $gitBin = if ($gitExe) { Split-Path $gitExe } else { $null }
+    foreach ($p in @((Split-Path $javaExe), $rubyBin, $gemBin, $gitBin, "$projectRoot\node_modules\.bin")) {
         if ($p -and ($env:PATH -notlike "*$p*")) { $env:PATH = "$p;$env:PATH" }
     }
 }
@@ -211,6 +225,16 @@ if ($rubyBin) {
     $prereqsFailed = $true
 }
 
+$gitExe = Find-Git
+if ($gitExe) {
+    $gv = (& $gitExe --version 2>&1).ToString().Trim()
+    Write-OK "Git     $gv"
+    Write-Info "$gitExe"
+} else {
+    Write-Fail "Git not found  ->  https://git-scm.com"
+    $prereqsFailed = $true
+}
+
 if ($prereqsFailed) {
     Write-Host ""
     Write-Host "  Install missing prerequisites then re-run." -ForegroundColor Red
@@ -219,7 +243,7 @@ if ($prereqsFailed) {
 }
 
 $gemBin = Find-GemBin
-Patch-SessionPath -javaExe $javaExe -rubyBin $rubyBin -gemBin $gemBin -projectRoot $targetDir
+Patch-SessionPath -javaExe $javaExe -rubyBin $rubyBin -gemBin $gemBin -projectRoot $targetDir -gitExe $gitExe
 
 # ------------------------------------------------------------------
 # IG DETAILS
@@ -239,12 +263,67 @@ $publisher   = Prompt-Value "Publisher Name" "My Organization"
 $pubUrl      = Prompt-Value "Publisher URL"  "http://example.org"
 $pubEmail    = Prompt-Value "Publisher Email" ""
 
+# ------------------------------------------------------------------
+# TEMPLATE SELECTION
+# ------------------------------------------------------------------
+Write-Host ""
+Write-Section "Template Selection"
+Write-Host "  The IG template controls the website layout, branding, and style." -ForegroundColor DarkGray
+Write-Host "  Ask your team for the package ID if using a custom organisational template." -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "    [1]  fhir.base.template    Standard community IG  (recommended for non-HL7)" -ForegroundColor White
+Write-Host "    [2]  hl7.fhir.template     Official HL7 IG        (ID must start with hl7.)" -ForegroundColor White
+Write-Host "    [3]  Custom                Enter a package ID     (e.g. myorg.fhir.template)" -ForegroundColor White
+Write-Host ""
+
+# Auto-suggest based on package ID prefix
+$templateDefault = if ($igId.StartsWith("hl7.")) { "2" } else { "1" }
+$templateChoice  = Read-Host "  Choose template [1/2/3, default $templateDefault]"
+if ([string]::IsNullOrWhiteSpace($templateChoice)) { $templateChoice = $templateDefault }
+
+switch ($templateChoice) {
+    "1" {
+        $igTemplate = "fhir.base.template#current"
+        Write-OK "Template: fhir.base.template#current"
+    }
+    "2" {
+        if (-not $igId.StartsWith("hl7.")) {
+            Write-Warn "hl7.fhir.template requires an ID starting with 'hl7.' - your ID is '$igId'."
+            Write-Warn "The build will fail at the template stage unless you change your package ID."
+        }
+        $igTemplate = "hl7.fhir.template#current"
+        Write-OK "Template: hl7.fhir.template#current"
+    }
+    "3" {
+        Write-Host ""
+        Write-Host "    Enter the full template package ID including version." -ForegroundColor DarkGray
+        Write-Host "    Examples:" -ForegroundColor DarkGray
+        Write-Host "      myorg.fhir.template#1.0.0   (published to packages.fhir.org)" -ForegroundColor DarkGray
+        Write-Host "      myorg.fhir.template#current  (latest CI build)" -ForegroundColor DarkGray
+        Write-Host "      #local-template              (use template/ folder in this project)" -ForegroundColor DarkGray
+        Write-Host ""
+        $customTemplate = Read-Host "    Template package ID"
+        if ([string]::IsNullOrWhiteSpace($customTemplate)) {
+            Write-Warn "No template entered, falling back to fhir.base.template#current."
+            $igTemplate = "fhir.base.template#current"
+        } else {
+            $igTemplate = $customTemplate.Trim()
+        }
+        Write-OK "Template: $igTemplate"
+    }
+    default {
+        Write-Warn "Invalid choice, using fhir.base.template#current."
+        $igTemplate = "fhir.base.template#current"
+    }
+}
+
 Write-Host ""
 Write-Host "  +-------------------------------------------------+" -ForegroundColor DarkGray
 Write-Host "  |  $($igTitle.PadRight(47))|" -ForegroundColor White
 Write-Host "  |  ID        : $($igId.PadRight(35))|" -ForegroundColor DarkGray
 Write-Host "  |  Canonical : $($canonical.PadRight(35))|" -ForegroundColor DarkGray
 Write-Host "  |  Version   : $("$version ($fhirVersion)".PadRight(35))|" -ForegroundColor DarkGray
+Write-Host "  |  Template  : $($igTemplate.PadRight(35))|" -ForegroundColor DarkGray
 Write-Host "  +-------------------------------------------------+" -ForegroundColor DarkGray
 Write-Host ""
 
@@ -279,8 +358,6 @@ $emailLine = if ($pubEmail) { "`n  email: $pubEmail" } else { "" }
 $sushiConfig = "id: $igId`ncanonical: $canonical`nname: $igName`ntitle: `"$igTitle`"`nstatus: $status`nversion: $version`nfhirVersion: $fhirVersion`nreleaseLabel: CI Build`nlicense: CC0-1.0`ncopyrightYear: ${year}+`n`npublisher:`n  name: $publisher`n  url: $pubUrl$emailLine`n`ndependencies:`n  hl7.terminology.r4: 5.5.0`n  # hl7.fhir.us.core: 6.1.0`n`npages:`n  index.md:`n    title: Home`n  artifacts.html:`n    title: Artifacts`n`nparameters:`n  show-inherited-invariants: false`n  excludettl: true`n"
 Write-NoBOM "$targetDir\sushi-config.yaml" $sushiConfig
 
-# hl7.fhir.template enforces hl7. prefix on ID — use fhir.base.template for community IGs
-$igTemplate = if ($igId.StartsWith("hl7.")) { "hl7.fhir.template#current" } else { "fhir.base.template#current" }
 Write-NoBOM "$targetDir\ig.ini" "[IG]`nig = fsh-generated/resources/ImplementationGuide-$igId.json`ntemplate = $igTemplate`n"
 Write-NoBOM "$targetDir\.gitignore" "input-cache/`noutput/`ntemp/`ntemplate/`ntxcache/`n*.log`n.DS_Store`n"
 Stop-Spinner "Config files written"

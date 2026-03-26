@@ -111,6 +111,19 @@ function Find-GemBin {
     return $null
 }
 
+function Find-Git {
+    $g = Get-Command git -ErrorAction SilentlyContinue
+    if ($g) { return $g.Source }
+    foreach ($candidate in @(
+        "$env:ProgramFiles\Git\cmd\git.exe",
+        "$env:ProgramFiles\Git\bin\git.exe",
+        "$env:LOCALAPPDATA\Programs\Git\cmd\git.exe"
+    )) {
+        if (Test-Path $candidate) { return $candidate }
+    }
+    return $null
+}
+
 # ==================================================================
 # MAIN
 # ==================================================================
@@ -182,6 +195,15 @@ if ($rubyBin) {
     $prereqsFailed = $true
 }
 
+$gitExe = Find-Git
+if ($gitExe) {
+    $gv = (& $gitExe --version 2>&1).ToString().Trim()
+    Write-OK "Git     $gv"
+} else {
+    Write-Fail "Git not found  ->  https://git-scm.com"
+    $prereqsFailed = $true
+}
+
 if ($prereqsFailed) {
     Write-Host ""
     Write-Host "  Fix missing prerequisites then re-run." -ForegroundColor Red
@@ -190,8 +212,9 @@ if ($prereqsFailed) {
 }
 
 $gemBin = Find-GemBin
+$gitBin = if ($gitExe) { Split-Path $gitExe } else { $null }
 $env:JAVA_HOME = Split-Path (Split-Path $javaExe)
-foreach ($p in @((Split-Path $javaExe), $rubyBin, $gemBin, "$projectRoot\node_modules\.bin")) {
+foreach ($p in @((Split-Path $javaExe), $rubyBin, $gemBin, $gitBin, "$projectRoot\node_modules\.bin")) {
     if ($p -and ($env:PATH -notlike "*$p*")) { $env:PATH = "$p;$env:PATH" }
 }
 Write-OK "Session PATH patched"
